@@ -1,0 +1,186 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <LedControl.h>
+#include <EEPROM.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// Broches et configuration
+#define BUZZER_PIN 9
+#define ULTRASONIC_TRIGGER 10
+#define ULTRASONIC_ECHO 11
+#define BTN_MODE 2
+#define BTN_STOP 3
+
+// Configuration LED Matrix
+#define DIN_PIN 12
+#define CS_PIN 7
+#define CLK_PIN 13
+#define MATRIX_COUNT 4
+
+// Configuration OLED (utilisation d'un écran 128x64)
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Classe DigiWake
+class DigiWake {
+private:
+    RTC_DS1307 rtc;
+    LedControl ledMatrix;
+    
+    // Paramètres de l'alarme
+    DateTime alarmTime;
+    bool alarmEnabled = false;
+    int snoozeMinutes = 5;
+    bool is12HourFormat = false;
+    
+    // Mélodies
+    const int melody1[10][2] = {
+        {262, 200}, {294, 200}, {330, 200}, 
+        {349, 200}, {392, 200}, {440, 200}
+    };
+    
+public:
+    DigiWake() : 
+        ledMatrix(DIN_PIN, CLK_PIN, CS_PIN, MATRIX_COUNT) {}
+    
+    void initialize() {
+        Wire.begin();
+        rtc.begin();
+        
+        // Configuration matrices LED
+        for(int i = 0; i < MATRIX_COUNT; i++) {
+            ledMatrix.shutdown(i, false);
+            ledMatrix.setIntensity(i, 8);
+            ledMatrix.clearDisplay(i);
+        }
+        
+        // Configuration OLED
+        if (!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  // Adresse I2C de l'écran SSD1306
+            Serial.println(F("Écran OLED non trouvé"));
+            for(;;); // Stop ici si l'écran n'est pas trouvé
+        }
+        oled.clearDisplay();
+        
+        // Configuration boutons
+        pinMode(BTN_MODE, INPUT_PULLUP);
+        pinMode(BTN_STOP, INPUT_PULLUP);
+        
+        // Configuration capteur ultrason
+        pinMode(ULTRASONIC_TRIGGER, OUTPUT);
+        pinMode(ULTRASONIC_ECHO, INPUT);
+    }
+    
+    void updateDisplay() {
+        DateTime now = rtc.now();
+        displayTimeOnMatrix(now);
+        displayTimeOnOLED(now);
+    }
+    
+    void checkAlarm() {
+        DateTime now = rtc.now();
+        if(alarmEnabled && now.hour() == alarmTime.hour() && 
+           now.minute() == alarmTime.minute()) {
+            triggerAlarm();
+        }
+    }
+    
+    void triggerAlarm() {
+        playMelody(melody1);
+        
+        // Gestion snooze via capteur ultrason
+        if(detectHandWave()) {
+            snoozeAlarm();
+        }
+    }
+    
+    bool detectHandWave() {
+        digitalWrite(ULTRASONIC_TRIGGER, LOW);
+        delayMicroseconds(2);
+        digitalWrite(ULTRASONIC_TRIGGER, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(ULTRASONIC_TRIGGER, LOW);
+        
+        long duration = pulseIn(ULTRASONIC_ECHO, HIGH);
+        int distance = duration * 0.034 / 2;
+        
+        return (distance < 20); // Main détectée à moins de 20 cm
+    }
+    
+    void playMelody(const int melody[][2]) {
+        for(int i = 0; i < 6; i++) {
+            tone(BUZZER_PIN, melody[i][0], melody[i][1]);
+            delay(melody[i][1]);
+        }
+        noTone(BUZZER_PIN);
+    }
+    
+    void snoozeAlarm() {
+        DateTime now = rtc.now();
+        alarmTime = now + TimeSpan(0, 0, snoozeMinutes, 0);
+    }
+    
+    void setup() {
+        initialize();
+        // Charger configuration de l'EEPROM
+        loadConfiguration();
+    }
+    
+    void loop() {
+        updateDisplay();
+        checkAlarm();
+        handleButtons();
+    }
+    
+    void handleButtons() {
+        // Logique de changement de mode et de réglages
+    }
+    
+    // Autres méthodes spécifiques à implémenter...
+    
+    void displayTimeOnOLED(DateTime now) {
+        oled.clearDisplay();
+        oled.setTextSize(1);      // Taille du texte
+        oled.setTextColor(SSD1306_WHITE); // Couleur du texte
+        oled.setCursor(0, 0);
+        
+        if (is12HourFormat) {
+            int hour = now.hour() % 12;
+            if (hour == 0) hour = 12;
+            oled.print(hour < 10 ? "0" : "");  // Affiche "09" au lieu de "9"
+            oled.print(hour);
+            oled.print(":");
+            oled.print(now.minute() < 10 ? "0" : ""); // Affiche "09" au lieu de "9"
+            oled.print(now.minute());
+            oled.print(now.hour() >= 12 ? " PM" : " AM");
+        } else {
+            oled.print(now.hour() < 10 ? "0" : "");  // Affiche "09" au lieu de "9"
+            oled.print(now.hour());
+            oled.print(":");
+            oled.print(now.minute() < 10 ? "0" : ""); // Affiche "09" au lieu de "9"
+            oled.print(now.minute());
+        }
+        
+        oled.display();
+    }
+
+    void displayTimeOnMatrix(DateTime now) {
+        // Afficher l'heure sur la matrice LED
+        int hour = now.hour();
+        int minute = now.minute();
+        
+        // Affichage de l'heure sur la matrice LED
+        for (int i = 0; i < MATRIX_COUNT; i++) {
+            ledMatrix.clearDisplay(i); // Effacer l'affichage précédent
+        }
+
+        // Affichage de l'heure : 2 digits pour l'heure et les minutes
+        ledMatrix.setDigit(0, 0, hour / 10, false);  // Première position de l'heure
+        ledMatrix.setDigit(0, 1, hour % 10, false);  // Deuxième position de l'heure
+        ledMatrix.setDigit(0, 2, minute / 10, false); // Première position des minutes
+        ledMatrix.setDigit(0, 3, minute % 10, false); // Deuxième position des minutes
+        
+        // Mise à jour de l'affichage sur la matrice
+        for (int i = 0; i < MATR
